@@ -1,0 +1,673 @@
+#!/bin/bash
+
+# ╔══════════════════════════════════════════════════╗
+# ║   mklink - Gerenciador de Links                  ║
+# ║   TSV: NOME URL CAT TS PAGINA TAGS CONT CAPITULO ║
+# ╚══════════════════════════════════════════════════╝
+
+# Paleta 256-cores otimizada para fundo escuro/transparente
+# Tons claros e suaves, alto contraste, sem azuis escuros ilegíveis
+VERDE='\033[38;5;114m'      # verde-menta claro
+AZUL='\033[38;5;111m'       # azul-céu claro (substitui o azul-marinho ilegível)
+AMARELO='\033[38;5;222m'    # amarelo trigo, sem ofuscar
+VERMELHO='\033[38;5;210m'   # vermelho-coral suave
+CIANO='\033[38;5;117m'      # ciano-gelo
+MAGENTA='\033[38;5;176m'    # lilás
+CINZA='\033[38;5;245m'      # cinza médio (legível em transparente)
+CINZA_ESC='\033[38;5;240m'  # cinza escuro p/ réguas discretas
+BRANCO='\033[38;5;253m'     # branco-creme p/ texto principal
+NEGRITO='\033[1m'
+RESET='\033[0m'
+
+DATA_DIR="$HOME/.config/mklink"
+DATA_FILE="$DATA_DIR/links.tsv"
+mkdir -p "$DATA_DIR"
+touch "$DATA_FILE"
+
+HAS_FZF=0
+command -v fzf >/dev/null 2>&1 && HAS_FZF=1
+
+# ───────────────────────────────────────────
+# Helpers de URL (página = último segmento numérico)
+# ───────────────────────────────────────────
+url_get_pagina() {
+    # devolve o número da página no fim da URL, ou vazio
+    echo "$1" | sed -nE 's|.*/([0-9]+)/?$|\1|p'
+}
+url_set_pagina() {
+    # troca o número final da URL pela nova página
+    local url="$1" nova="$2"
+    echo "$url" | sed -E "s|/([0-9]+)(/?)$|/${nova}\2|"
+}
+
+# ───────────────────────────────────────────
+# Migração: garante 8 colunas
+#   1 NOME  2 URL  3 CAT  4 TS  5 PAGINA  6 TAGS  7 CONT  8 CAPITULO
+# ───────────────────────────────────────────
+migrar_arquivo() {
+    [[ ! -s "$DATA_FILE" ]] && return
+    local tmp; tmp=$(mktemp)
+    awk -F'\t' 'BEGIN{OFS="\t"} NF>=1 {
+        nome=$1; url=$2; cat=$3;
+        ts  =(NF>=4 && $4!="")?$4:"0";
+        pag =(NF>=5 && $5!="")?$5:"";
+        tags=(NF>=6)?$6:"";
+        cont=(NF>=7 && $7!="")?$7:"0";
+        capi=(NF>=8)?$8:"";
+        # se página vazia, tenta extrair da URL
+        if (pag=="" || pag=="0") {
+            n=url
+            if (match(n, /\/[0-9]+\/?$/)) {
+                seg=substr(n, RSTART+1, RLENGTH-1)
+                sub(/\/$/, "", seg)
+                pag=seg
+            } else { pag="0" }
+        }
+        print nome,url,cat,ts,pag,tags,cont,capi
+    }' "$DATA_FILE" > "$tmp" && mv "$tmp" "$DATA_FILE"
+}
+migrar_arquivo
+
+# ───────────────────────────────────────────
+# UI util
+# ───────────────────────────────────────────
+REGUA="───────────────────────────────────────────────────────────"
+
+cabecalho() {
+    local titulo="${1:-🔖 mklink - Meus Links}"
+    clear
+    echo ""
+    echo -e "  ${AZUL}┌${REGUA:0:50}┐${RESET}"
+    echo -e "  ${AZUL}│${RESET}  ${NEGRITO}${VERDE}${titulo}${RESET}"
+    echo -e "  ${AZUL}└${REGUA:0:50}┘${RESET}"
+    [[ "$HAS_FZF" == "1" ]] && echo -e "  ${CINZA}⚡ fzf disponível • use 'f' para picker fuzzy${RESET}"
+    echo ""
+}
+
+# Separador discreto com título opcional inline
+separador() {
+    local titulo="$1" largura=50
+    if [[ -z "$titulo" ]]; then
+        echo -e "  ${CINZA_ESC}${REGUA:0:largura}${RESET}"
+    else
+        local rest=$((largura - ${#titulo} - 3))
+        (( rest < 3 )) && rest=3
+        echo -e "  ${CINZA_ESC}── ${CIANO}${titulo}${CINZA_ESC} ${REGUA:0:rest}${RESET}"
+    fi
+}
+
+tempo_relativo() {
+    local ts="$1"
+    [[ -z "$ts" || "$ts" == "0" ]] && echo "—" && return
+    local agora=$(date +%s) diff=$(( $(date +%s) - ts ))
+    (( diff < 60 ))      && echo "agora"            && return
+    (( diff < 3600 ))    && echo "$((diff/60))min"  && return
+    (( diff < 86400 ))   && echo "$((diff/3600))h"  && return
+    (( diff < 2592000 )) && echo "$((diff/86400))d" && return
+    echo "$((diff/2592000))mês"
+}
+
+# ───────────────────────────────────────────
+# Bump de acesso
+# args: url_alvo, modo: "page" (avança página) | "open" (só conta)
+# ───────────────────────────────────────────
+bumpar_acesso() {
+    local url_alvo="$1" modo="$2" agora
+    agora=$(date +%s)
+
+    local nova_url="$url_alvo" nova_pag=""
+    if [[ "$modo" == "page" ]]; then
+        local pag_atual
+        pag_atual=$(url_get_pagina "$url_alvo")
+        if [[ -n "$pag_atual" ]]; then
+            nova_pag=$((pag_atual + 1))
+            nova_url=$(url_set_pagina "$url_alvo" "$nova_pag")
+        fi
+    fi
+
+    local tmp; tmp=$(mktemp)
+    awk -F'\t' -v url="$url_alvo" -v agora="$agora" \
+        -v nova_url="$nova_url" -v nova_pag="$nova_pag" \
+        -v modo="$modo" 'BEGIN{OFS="\t"} {
+        if ($2 == url) {
+            ts=agora;
+            cont=$7+0+1;
+            pag=$5;
+            urlf=$2;
+            if (modo=="page" && nova_pag!="") {
+                pag=nova_pag;
+                urlf=nova_url;
+            }
+            print $1,urlf,$3,ts,pag,$6,cont,$8
+        } else { print $0 }
+    }' "$DATA_FILE" > "$tmp" && mv "$tmp" "$DATA_FILE"
+}
+
+# ───────────────────────────────────────────
+# Formatação
+# args: indice, linha_tsv, modo_manga(0|1)
+# ───────────────────────────────────────────
+formatar_linha() {
+    local i="$1" linha="$2" modo_manga="$3"
+    IFS=$'\t' read -r nome url categoria ts pag tags cont capi <<< "$linha"
+
+    local rel marker badge_pag="" badge_cap="" badge_cont="" badge_tags=""
+    rel=$(tempo_relativo "$ts")
+    if [[ "$ts" == "0" || -z "$ts" ]]; then marker="🆕"; else marker="📖"; fi
+
+    if [[ "$modo_manga" == "1" ]]; then
+        [[ "$pag"  != "0" && -n "$pag"  ]] && badge_pag=" ${MAGENTA}pág.${pag}${RESET}"
+        [[ -n "$capi" ]] && badge_cap=" ${AZUL}cap.${capi}${RESET}"
+    fi
+    [[ "$cont" != "0" && -n "$cont" ]] && badge_cont=" ${CINZA}×${cont}${RESET}"
+    [[ -n "$tags" ]] && badge_tags=" ${CIANO}[${tags}]${RESET}"
+
+    # Trunca nome para manter colunas alinhadas
+    local nome_curto="$nome"
+    (( ${#nome_curto} > 24 )) && nome_curto="${nome_curto:0:23}…"
+
+    if [[ "$modo_manga" == "1" ]]; then
+        local url_curta="…${url: -10}"
+        printf "  ${VERDE}%2d)${RESET} %s ${NEGRITO}${BRANCO}%-24s${RESET} ${CINZA}%-7s${RESET}${badge_pag}${badge_cap}${badge_cont}  ${CINZA_ESC}↳${RESET} ${AMARELO}%s${RESET}${badge_tags}\n" \
+               "$i" "$marker" "$nome_curto" "$rel" "$url_curta"
+    else
+        printf "  ${VERDE}%2d)${RESET} %s ${NEGRITO}${BRANCO}%-28s${RESET} ${CINZA}%-7s${RESET}${badge_cont}  ${AMARELO}%s${RESET}${badge_tags}\n" \
+               "$i" "$marker" "$nome_curto" "$rel" "$url"
+    fi
+}
+
+# ───────────────────────────────────────────
+# fzf picker
+# ───────────────────────────────────────────
+fzf_picker() {
+    local prompt="$1"
+    awk -F'\t' '{
+        pag =($5!="0" && $5!="")?" pág."$5:"";
+        capi=($8!="")?" cap."$8:"";
+        cont=($7!="0" && $7!="")?" ×"$7:"";
+        tags=($6!="")?" ["$6"]":"";
+        printf "%s%s%s%s%s\t%s\n", $1, pag, capi, cont, tags, $0
+    }' | fzf --ansi --with-nth=1 --delimiter='\t' --prompt="$prompt " --height=60% --reverse \
+        | cut -f2-
+}
+
+# ───────────────────────────────────────────
+# Listagem geral
+# ───────────────────────────────────────────
+listar_links() {
+    if [[ ! -s "$DATA_FILE" ]]; then
+        echo -e "${AMARELO}📭 Nenhum link salvo ainda.${RESET}"
+        return 1
+    fi
+    local i=1 cat_anterior=""
+    INDEX_MAP=()
+    while IFS= read -r linha; do
+        [[ -z "$linha" ]] && continue
+        local categoria; categoria=$(echo -e "$linha" | cut -f3)
+        if [[ "$categoria" != "$cat_anterior" ]]; then
+            echo ""
+            separador "📂 ${categoria:-Geral}"
+            cat_anterior="$categoria"
+        fi
+        formatar_linha "$i" "$linha" 0
+        INDEX_MAP[$i]="$linha"
+        ((i++))
+    done < <(sort -t$'\t' -k3,3 -k1,1 "$DATA_FILE")
+    echo ""
+    return 0
+}
+
+# ───────────────────────────────────────────
+# Abrir
+# args: linha_tsv, modo: "page" | "open"
+# ───────────────────────────────────────────
+abrir_pela_linha() {
+    local linha="$1" modo="${2:-open}"
+    local nome url
+    nome=$(echo -e "$linha" | cut -f1)
+    url=$(echo -e "$linha" | cut -f2)
+    echo -e "${VERDE}🚀 Abrindo:${RESET} $nome"
+    echo -e "   ${AMARELO}$url${RESET}"
+    xdg-open "$url" >/dev/null 2>&1 &
+    bumpar_acesso "$url" "$modo"
+    if [[ "$modo" == "page" ]]; then
+        local pag=$(url_get_pagina "$url")
+        if [[ -n "$pag" ]]; then
+            echo -e "   ${CINZA}↪ próxima vez abre: pág.$((pag+1))${RESET}"
+        fi
+    fi
+}
+
+# ───────────────────────────────────────────
+# Adicionar / remover / setar
+# ───────────────────────────────────────────
+adicionar_link() {
+    local cat_fixa="$1"
+    echo ""
+    echo -e "${AZUL}➕ Adicionar novo link${RESET}"
+    read -p "🌐 URL: " URL
+    [[ -z "$URL" ]] && echo -e "${VERMELHO}❌ URL vazia.${RESET}" && return
+    read -p "📎 Nome: " NOME
+    [[ -z "$NOME" ]] && echo -e "${VERMELHO}❌ Nome vazio.${RESET}" && return
+
+    local CAT
+    if [[ -n "$cat_fixa" ]]; then
+        CAT="$cat_fixa"
+    else
+        echo ""
+        echo -e "${AMARELO}📂 Categoria:${RESET}"
+        echo "  1) Geral   2) Mangás   3) Artigos   4) Outra"
+        read -p "Escolha [1-4]: " OP
+        case "$OP" in
+            2) CAT="Mangás" ;;
+            3) CAT="Artigos" ;;
+            4) read -p "📁 Nome da categoria: " CAT ;;
+            *) CAT="Geral" ;;
+        esac
+    fi
+
+    read -p "🏷️  Tags (vírgula, opcional): " TAGS
+
+    # Página: auto-detectada da URL
+    local PAG
+    PAG=$(url_get_pagina "$URL")
+    [[ -z "$PAG" ]] && PAG="0"
+
+    # Capítulo: opcional
+    local CAPI=""
+    if [[ "$CAT" == "Mangás" ]]; then
+        read -p "📑 Capítulo (opcional, Enter pula): " CAPI
+        if [[ "$PAG" != "0" ]]; then
+            echo -e "${CINZA}   página detectada da URL: $PAG${RESET}"
+        fi
+    fi
+
+    NOME="${NOME//$'\t'/ }"; URL="${URL//$'\t'/ }"
+    CAT="${CAT//$'\t'/ }"; TAGS="${TAGS//$'\t'/ }"
+    CAPI="${CAPI//$'\t'/ }"
+    TAGS=$(echo "$TAGS" | sed 's/ *, */,/g; s/^ *//; s/ *$//')
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$NOME" "$URL" "$CAT" "0" "$PAG" "$TAGS" "0" "$CAPI" >> "$DATA_FILE"
+    echo -e "${VERDE}✅ Adicionado: $NOME ${CINZA}[$CAT]${RESET}"
+}
+
+remover_link_por_linha() {
+    local linha="$1"
+    [[ -z "$linha" ]] && return
+    local nome="${linha%%$'\t'*}"
+    read -p "Confirma remover '$nome'? [s/N]: " C
+    [[ ! "$C" =~ ^[sS]$ ]] && return
+    local tmp; tmp=$(mktemp)
+    grep -vxF "$linha" "$DATA_FILE" > "$tmp"
+    mv "$tmp" "$DATA_FILE"
+    echo -e "${VERDE}✅ Removido.${RESET}"
+}
+
+remover_link() {
+    listar_links || return
+    read -p "🗑️  Número para remover: " N
+    [[ ! "$N" =~ ^[0-9]+$ ]] && echo -e "${VERMELHO}❌ Inválido.${RESET}" && return
+    remover_link_por_linha "${INDEX_MAP[$N]}"
+}
+
+# Define página manualmente (atualiza URL e coluna PAGINA)
+definir_pagina() {
+    local url_alvo="$1" nova_pag="$2"
+    local nova_url
+    nova_url=$(url_set_pagina "$url_alvo" "$nova_pag")
+    local tmp; tmp=$(mktemp)
+    awk -F'\t' -v url="$url_alvo" -v np="$nova_pag" -v nu="$nova_url" 'BEGIN{OFS="\t"} {
+        if ($2 == url) print $1,nu,$3,$4,np,$6,$7,$8;
+        else print $0
+    }' "$DATA_FILE" > "$tmp" && mv "$tmp" "$DATA_FILE"
+}
+
+# Define capítulo (string, pode ser vazio)
+definir_capitulo() {
+    local url_alvo="$1" novo_cap="$2"
+    local tmp; tmp=$(mktemp)
+    awk -F'\t' -v url="$url_alvo" -v cap="$novo_cap" 'BEGIN{OFS="\t"} {
+        if ($2 == url) print $1,$2,$3,$4,$5,$6,$7,cap;
+        else print $0
+    }' "$DATA_FILE" > "$tmp" && mv "$tmp" "$DATA_FILE"
+}
+
+# ───────────────────────────────────────────
+# 📖 Modo LEITURA: trava o terminal esperando a URL final
+# args: linha_tsv
+# ───────────────────────────────────────────
+ler_link_por_linha() {
+    local linha="$1"
+    [[ -z "$linha" ]] && return 1
+    local nome url_antiga categoria ts pag_antiga tags cont capi
+    IFS=$'\t' read -r nome url_antiga categoria ts pag_antiga tags cont capi <<< "$linha"
+
+    echo ""
+    echo -e "${MAGENTA}📖 Modo leitura:${RESET} ${VERDE}$nome${RESET}"
+    echo -e "   ${CINZA}URL atual:${RESET} ${AMARELO}$url_antiga${RESET}"
+    [[ "$pag_antiga" != "0" && -n "$pag_antiga" ]] && \
+        echo -e "   ${CINZA}pág. atual:${RESET} ${MAGENTA}$pag_antiga${RESET}"
+    echo ""
+
+    read -p "Abrir a URL atual no navegador agora? [S/n]: " AB
+    if [[ ! "$AB" =~ ^[nN]$ ]]; then
+        xdg-open "$url_antiga" >/dev/null 2>&1 &
+        echo -e "${VERDE}🚀 Aberto.${RESET}"
+    fi
+
+    echo ""
+    echo -e "${CIANO}⏳ Terminal travado.${RESET} Quando terminar a leitura,"
+    echo -e "   cole abaixo a URL final e tecle Enter."
+    echo -e "   ${CINZA}(Enter vazio cancela sem alterar nada)${RESET}"
+    echo ""
+    local NOVA_URL
+    read -r -p "🔗 Nova URL: " NOVA_URL
+
+    if [[ -z "$NOVA_URL" ]]; then
+        echo -e "${AMARELO}↩  Cancelado, nada alterado.${RESET}"
+        return 1
+    fi
+
+    NOVA_URL="${NOVA_URL//$'\t'/ }"
+
+    local NOVA_PAG
+    NOVA_PAG=$(url_get_pagina "$NOVA_URL")
+    [[ -z "$NOVA_PAG" ]] && NOVA_PAG="$pag_antiga"
+    [[ -z "$NOVA_PAG" ]] && NOVA_PAG="0"
+
+    local agora; agora=$(date +%s)
+    local tmp; tmp=$(mktemp)
+    awk -F'\t' -v url="$url_antiga" -v nu="$NOVA_URL" -v np="$NOVA_PAG" -v ts="$agora" 'BEGIN{OFS="\t"} {
+        if ($2 == url) {
+            cont=$7+0+1;
+            print $1,nu,$3,ts,np,$6,cont,$8
+        } else { print $0 }
+    }' "$DATA_FILE" > "$tmp" && mv "$tmp" "$DATA_FILE"
+
+    echo ""
+    echo -e "${VERDE}✅ Link atualizado.${RESET}"
+    echo -e "   ${CINZA}antes:${RESET} ${AMARELO}$url_antiga${RESET}"
+    echo -e "   ${CINZA}agora:${RESET} ${AMARELO}$NOVA_URL${RESET}"
+    if [[ "$NOVA_PAG" != "0" && "$NOVA_PAG" != "$pag_antiga" ]]; then
+        echo -e "   ${CINZA}pág.:${RESET} ${MAGENTA}${pag_antiga:-—} → $NOVA_PAG${RESET}"
+    fi
+}
+
+# Wrapper interativo: lista e pergunta qual número ler
+ler_link_interativo() {
+    listar_links || return
+    read -p "📖 Número para entrar em modo leitura: " N
+    [[ ! "$N" =~ ^[0-9]+$ ]] && echo -e "${VERMELHO}❌ Inválido.${RESET}" && return
+    ler_link_por_linha "${INDEX_MAP[$N]}"
+}
+
+# ───────────────────────────────────────────
+# 📚 Modo MANGÁS
+# ───────────────────────────────────────────
+modo_mangas() {
+    local filtro="" filtro_tag=""
+    while true; do
+        cabecalho "📚  Mangás"
+
+        local pool=()
+        while IFS= read -r l; do
+            [[ -n "$l" ]] && pool+=("$l")
+        done < <(awk -F'\t' '$3=="Mangás"' "$DATA_FILE" \
+                   | sort -t$'\t' -k4,4nr -k1,1)
+
+        if [[ ${#pool[@]} -eq 0 ]]; then
+            echo -e "  ${AMARELO}📦 Nenhum mangá salvo ainda.${RESET}"
+            echo ""
+            separador "ações"
+            echo -e "   ${VERDE}+${RESET} / ${VERDE}a${RESET}   adicionar mangá"
+            echo -e "   ${VERDE}q${RESET}       voltar"
+            echo ""
+            read -p "  📚 ❯ " OPT
+            case "$OPT" in
+                +|a|A) adicionar_link "Mangás" ;;
+                q|Q|"") return ;;
+            esac
+            continue
+        fi
+
+        [[ -n "$filtro"     ]] && echo -e "  ${CINZA}🔍 filtro: \"$filtro\"${RESET}"
+        [[ -n "$filtro_tag" ]] && echo -e "  ${CINZA}🏷️  tag: \"$filtro_tag\"${RESET}"
+        [[ -n "$filtro" || -n "$filtro_tag" ]] && echo ""
+        local i=1
+        MANGA_MAP=()
+        for l in "${pool[@]}"; do
+            if [[ -n "$filtro" ]]; then
+                shopt -s nocasematch
+                if [[ "$l" != *"$filtro"* ]]; then shopt -u nocasematch; continue; fi
+                shopt -u nocasematch
+            fi
+            if [[ -n "$filtro_tag" ]]; then
+                local tags_field; tags_field=$(echo -e "$l" | cut -f6)
+                shopt -s nocasematch
+                if [[ ",$tags_field," != *",$filtro_tag,"* ]]; then shopt -u nocasematch; continue; fi
+                shopt -u nocasematch
+            fi
+            formatar_linha "$i" "$l" 1
+            MANGA_MAP[$i]="$l"
+            ((i++))
+        done
+
+        [[ ${#MANGA_MAP[@]} -eq 0 ]] && echo -e "  ${VERMELHO}Nenhum resultado.${RESET}"
+
+        echo ""
+        separador "ações"
+        echo -e "   ${VERDE}N${RESET}        abrir + avançar página"
+        echo -e "   ${VERDE}oN${RESET}       abrir sem avançar"
+        echo -e "   ${VERDE}lN${RESET}  📖   modo leitura (trava até colar URL final)"
+        separador "edição"
+        echo -e "   ${VERDE}sN ${CINZA}<n>${RESET}   definir página      ${VERDE}cN ${CINZA}<txt>${RESET}  capítulo"
+        echo -e "   ${VERDE}rN${RESET}       remover             ${VERDE}+${RESET} / ${VERDE}a${RESET}     adicionar"
+        separador "busca"
+        echo -e "   ${VERDE}/${RESET}texto   buscar          ${VERDE}#${RESET}tag       filtrar tag"
+        echo -e "   ${VERDE}c${RESET}        limpar filtros      ${VERDE}q${RESET}         voltar"
+        [[ "$HAS_FZF" == "1" ]] && echo -e "   ${VERDE}f${RESET}        🔭 picker fzf"
+        echo ""
+        read -p "  📚 ❯ " OPT
+
+        case "$OPT" in
+            q|Q|"")  return ;;
+            c|C)     filtro=""; filtro_tag="" ;;
+            +|a|A)   adicionar_link "Mangás"; read -p "Enter..." _ ;;
+            f|F)
+                if [[ "$HAS_FZF" == "1" ]]; then
+                    local escolha
+                    escolha=$(printf '%s\n' "${pool[@]}" | fzf_picker "📚")
+                    if [[ -n "$escolha" ]]; then
+                        read -p "Avançar página? [S/n]: " IC
+                        local modo="page"
+                        [[ "$IC" =~ ^[nN]$ ]] && modo="open"
+                        abrir_pela_linha "$escolha" "$modo"
+                        sleep 1
+                    fi
+                fi
+                ;;
+            \#*) filtro_tag="${OPT#\#}" ;;
+            /*)  filtro="${OPT#/}" ;;
+            r[0-9]*)
+                local n="${OPT#r}"
+                remover_link_por_linha "${MANGA_MAP[$n]}"
+                sleep 1
+                ;;
+            o[0-9]*)
+                local n="${OPT#o}"
+                [[ -n "${MANGA_MAP[$n]}" ]] && abrir_pela_linha "${MANGA_MAP[$n]}" "open" && sleep 1
+                ;;
+            l[0-9]*)
+                local n="${OPT#l}"
+                if [[ -n "${MANGA_MAP[$n]}" ]]; then
+                    ler_link_por_linha "${MANGA_MAP[$n]}"
+                    read -p "Enter para continuar..." _
+                fi
+                ;;
+            s[0-9]*)
+                local rest="${OPT#s}"
+                local n="${rest%% *}"
+                local val="${rest#* }"; [[ "$val" == "$rest" ]] && val=""
+                if [[ -n "${MANGA_MAP[$n]}" ]]; then
+                    [[ -z "$val" ]] && read -p "Nova página: " val
+                    if [[ "$val" =~ ^[0-9]+$ ]]; then
+                        local url; url=$(echo -e "${MANGA_MAP[$n]}" | cut -f2)
+                        definir_pagina "$url" "$val"
+                        echo -e "${VERDE}✅ Página = $val${RESET}"
+                        sleep 1
+                    fi
+                fi
+                ;;
+            c[0-9]*)
+                local rest="${OPT#c}"
+                local n="${rest%% *}"
+                local val="${rest#* }"; [[ "$val" == "$rest" ]] && val=""
+                if [[ -n "${MANGA_MAP[$n]}" ]]; then
+                    [[ -z "$val" ]] && read -p "Novo capítulo (vazio limpa): " val
+                    local url; url=$(echo -e "${MANGA_MAP[$n]}" | cut -f2)
+                    definir_capitulo "$url" "$val"
+                    echo -e "${VERDE}✅ Capítulo = ${val:-(vazio)}${RESET}"
+                    sleep 1
+                fi
+                ;;
+            [0-9]*)
+                if [[ -n "${MANGA_MAP[$OPT]}" ]]; then
+                    abrir_pela_linha "${MANGA_MAP[$OPT]}" "page"
+                    sleep 1
+                fi
+                ;;
+            *) [[ -n "$OPT" ]] && filtro="$OPT" ;;
+        esac
+    done
+}
+
+# ───────────────────────────────────────────
+# fzf geral
+# ───────────────────────────────────────────
+abrir_via_fzf() {
+    if [[ "$HAS_FZF" != "1" ]]; then
+        echo -e "${VERMELHO}fzf não está instalado.${RESET}"
+        echo "Instale com: sudo apt install fzf"
+        return 1
+    fi
+    local escolha
+    escolha=$(sort -t$'\t' -k3,3 -k1,1 "$DATA_FILE" | fzf_picker "🔖")
+    [[ -z "$escolha" ]] && return
+    local cat; cat=$(echo -e "$escolha" | cut -f3)
+    local modo="open"
+    if [[ "$cat" == "Mangás" ]]; then
+        read -p "Avançar página? [S/n]: " IC
+        [[ ! "$IC" =~ ^[nN]$ ]] && modo="page"
+    fi
+    abrir_pela_linha "$escolha" "$modo"
+}
+
+# ───────────────────────────────────────────
+# Ajuda
+# ───────────────────────────────────────────
+mostrar_ajuda() {
+    cat <<EOF
+Uso:
+  mklink                 Menu interativo geral
+  mklink <numero>        Abre link pelo número (lista geral)
+  mklink m | mangas      📚 Modo mangás
+  mklink l | ler | read  📖 Modo leitura (trava até colar URL final)
+  mklink f | fzf         🔭 Picker fzf (se instalado)
+  mklink add             Adiciona link
+  mklink list            Lista todos
+  mklink rm              Remove
+  mklink edit            Edita arquivo TSV
+  mklink -h | --help     Ajuda
+
+Página vs Capítulo:
+  • Página é o número no final da URL (ex: .../chapter/<uuid>/7 → pág.7).
+    É detectada automaticamente ao adicionar e avança ao abrir com 'N'.
+  • Capítulo é uma string OPCIONAL pra você anotar (ex: "142", "Saga X 03").
+
+No modo mangás:
+  N         abre e avança página (URL: /7 → /8)
+  oN        abre sem avançar
+  lN        📖 modo leitura: trava terminal até você colar a URL final
+  sN <n>    define a página manualmente (atualiza URL também)
+  cN <txt>  define/limpa capítulo (texto livre, vazio limpa)
+  /texto    busca       #tag     filtra tag
+  rN        remove      +        adiciona       q  volta
+
+Modo leitura (l / lN):
+  • Abre a URL atual (se você confirmar) e trava o terminal.
+  • Cole a URL final da leitura quando voltar.
+  • Atualiza apenas a URL, e a página é re-derivada automaticamente.
+  • Enter vazio cancela sem alterar nada.
+
+Arquivo: $DATA_FILE
+Formato TSV (8 colunas):
+  NOME  URL  CATEGORIA  LAST_TS  PAGINA  TAGS  CONTADOR  CAPITULO
+EOF
+}
+
+# ───────────────────────────────────────────
+# CLI direto
+# ───────────────────────────────────────────
+case "$1" in
+    -h|--help|help) mostrar_ajuda; exit 0 ;;
+    add)            cabecalho; adicionar_link; exit 0 ;;
+    list|ls)        cabecalho; listar_links; exit 0 ;;
+    rm|remove|del)  cabecalho; remover_link; exit 0 ;;
+    edit)           ${EDITOR:-nano} "$DATA_FILE"; exit 0 ;;
+    m|mangas|manga) modo_mangas; exit 0 ;;
+    l|ler|read)     cabecalho "📖  Modo leitura"; ler_link_interativo; exit 0 ;;
+    f|fzf)          cabecalho; abrir_via_fzf; exit 0 ;;
+    '')             : ;;
+    *)
+        if [[ "$1" =~ ^[0-9]+$ ]]; then
+            cabecalho
+            listar_links >/dev/null
+            linha="${INDEX_MAP[$1]}"
+            [[ -z "$linha" ]] && echo -e "${VERMELHO}❌ Número inválido.${RESET}" && exit 1
+            abrir_pela_linha "$linha" "open"
+            exit 0
+        fi
+        echo -e "${VERMELHO}❌ Comando desconhecido: $1${RESET}"
+        mostrar_ajuda
+        exit 1
+        ;;
+esac
+
+# ───────────────────────────────────────────
+# Menu geral
+# ───────────────────────────────────────────
+while true; do
+    cabecalho
+    listar_links
+    separador "ações"
+    echo -e "   ${VERDE}N${RESET}        abrir link número N"
+    echo -e "   ${VERDE}m${RESET}   📚   modo mangás"
+    echo -e "   ${VERDE}l${RESET}   📖   modo leitura (atualiza URL ao terminar)"
+    [[ "$HAS_FZF" == "1" ]] && \
+    echo -e "   ${VERDE}f${RESET}   🔭   picker fzf"
+    separador "edição"
+    echo -e "   ${VERDE}a${RESET}        adicionar          ${VERDE}r${RESET}   remover"
+    echo -e "   ${VERDE}e${RESET}        editar arquivo     ${VERDE}q${RESET}   sair"
+    echo ""
+    read -p "  👉 ❯ " OPT
+    case "$OPT" in
+        q|Q|sair|exit) echo "👋 Até mais!"; exit 0 ;;
+        m|M)           modo_mangas ;;
+        l|L)           ler_link_interativo; read -p "Enter para continuar..." _ ;;
+        f|F)           abrir_via_fzf; read -p "Enter..." _ ;;
+        a|A)           adicionar_link; read -p "Enter para continuar..." _ ;;
+        r|R)           remover_link;   read -p "Enter para continuar..." _ ;;
+        e|E)           ${EDITOR:-nano} "$DATA_FILE" ;;
+        '')            continue ;;
+        *)
+            if [[ "$OPT" =~ ^[0-9]+$ && -n "${INDEX_MAP[$OPT]}" ]]; then
+                abrir_pela_linha "${INDEX_MAP[$OPT]}" "open"
+                read -p "Enter para continuar..." _
+            else
+                echo -e "${VERMELHO}❌ Opção inválida.${RESET}"
+                sleep 1
+            fi
+            ;;
+    esac
+done
