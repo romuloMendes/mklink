@@ -39,9 +39,6 @@ Não era só a memoria da minha cabeça cheia (RAM), era atenção fragmentada, 
 
 > _"Não quero estar mantendo muitas abas abertas no navegador, nem usando os favoritos — eles não atendem o que eu preciso para **lembrar de onde parei** e, depois de um tempo, vira muito **link lixo**: coisa que já li misturada com coisa que não li."_
 
-Cada aba aberta ocupava espaço mental.
-Não era só RAM — era atenção fragmentada, contexto pendente e a sensação constante de que eu estava esquecendo alguma coisa importante.
-
 E o pior: mesmo deixando tudo aberto “pra depois”, eu ainda perdia tempo tentando responder perguntas simples:
 
 1. _“Em qual página eu parei?”_
