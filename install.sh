@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # install.sh — instala o mklink em ~/.local/bin
+
+# chmod +x /home/romulo/mklink/install.sh && ls -la /home/romulo/mklink/install.sh
+
 set -euo pipefail
 
 # ─── cores ────────────────────────────────────────────────────────────────
@@ -21,7 +24,7 @@ err()  { echo "${C_ERR}✘${C_RST} $*" >&2; }
 
 # ─── paths ────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="${SCRIPT_DIR}/bin/mklink"
+SRC="${SCRIPT_DIR}/mklink"
 DEST_DIR="${HOME}/.local/bin"
 DEST="${DEST_DIR}/mklink"
 
@@ -30,6 +33,14 @@ echo "${C_INFO}╭────────────────────�
 echo "${C_INFO}│${C_RST}  🔗 ${C_OK}mklink${C_RST} — instalador                    ${C_INFO}│${C_RST}"
 echo "${C_INFO}╰──────────────────────────────────────────────╯${C_RST}"
 echo
+
+# ─── bloqueia execução com sudo ──────────────────────────────────────────
+if [[ -n "${SUDO_USER:-}" ]] || [[ "$(id -u)" -eq 0 ]]; then
+    err "Não execute este instalador com sudo."
+    err "Ele instala em ~/.local/bin do seu usuário, não do root."
+    err "Use apenas:  ./install.sh"
+    exit 1
+fi
 
 # ─── verifica source ──────────────────────────────────────────────────────
 if [[ ! -f "$SRC" ]]; then
@@ -84,18 +95,44 @@ info "Instalando em: ${DEST}"
 install -m 755 "$SRC" "$DEST"
 ok "Binário instalado (modo 755)."
 
-# ─── verifica PATH ────────────────────────────────────────────────────────
+# ─── configura PATH automaticamente ─────────────────────────────────────
 echo
 if echo ":$PATH:" | grep -q ":${DEST_DIR}:"; then
     ok "${DEST_DIR} já está no seu PATH."
 else
-    warn "${DEST_DIR} NÃO está no seu PATH."
-    echo
-    echo "  Adicione esta linha ao seu ${C_INFO}~/.bashrc${C_RST} (ou ~/.zshrc):"
-    echo
-    echo "      ${C_OK}export PATH=\"\$HOME/.local/bin:\$PATH\"${C_RST}"
-    echo
-    echo "  Depois recarregue:  ${C_DIM}source ~/.bashrc${C_RST}"
+    # detecta o shell rc do usuário
+    SHELL_RC=""
+    if [[ -f "${HOME}/.zshrc" ]] && [[ "${SHELL}" == */zsh ]]; then
+        SHELL_RC="${HOME}/.zshrc"
+    elif [[ -f "${HOME}/.bashrc" ]]; then
+        SHELL_RC="${HOME}/.bashrc"
+    elif [[ -f "${HOME}/.profile" ]]; then
+        SHELL_RC="${HOME}/.profile"
+    fi
+
+    PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
+
+    if [[ -n "$SHELL_RC" ]] && ! grep -qF "$PATH_LINE" "$SHELL_RC"; then
+        echo "" >> "$SHELL_RC"
+        echo "# adicionado pelo mklink installer" >> "$SHELL_RC"
+        echo "$PATH_LINE" >> "$SHELL_RC"
+        ok "PATH configurado em ${SHELL_RC}."
+        echo
+        warn "⚠️  IMPORTANTE: feche este terminal e abra um novo."
+        warn "   Só assim o mklink ficará disponível no PATH."
+        warn "   (ou rode:  source ${SHELL_RC}  neste terminal)"
+    elif [[ -n "$SHELL_RC" ]]; then
+        ok "${DEST_DIR} já está definido em ${SHELL_RC}."
+        echo
+        warn "⚠️  IMPORTANTE: feche este terminal e abra um novo."
+        warn "   Só assim o mklink ficará disponível no PATH."
+        warn "   (ou rode:  source ${SHELL_RC}  neste terminal)"
+    else
+        warn "${DEST_DIR} NÃO está no seu PATH."
+        echo
+        echo "  Adicione ao seu shell rc:"
+        echo "      ${C_OK}export PATH=\"\$HOME/.local/bin:\$PATH\"${C_RST}"
+    fi
 fi
 
 # ─── final ────────────────────────────────────────────────────────────────
@@ -104,7 +141,7 @@ echo "${C_OK}╭─────────────────────�
 echo "${C_OK}│${C_RST}  ✅ Instalação concluída!                    ${C_OK}│${C_RST}"
 echo "${C_OK}╰──────────────────────────────────────────────╯${C_RST}"
 echo
-echo "  Experimente agora:"
+echo "  Experimente agora ${C_DIM}(em um terminal novo)${C_RST}:"
 echo "    ${C_INFO}mklink -h${C_RST}      → ajuda"
 echo "    ${C_INFO}mklink add${C_RST}     → adicionar primeiro link"
 echo "    ${C_INFO}mklink${C_RST}         → listar"

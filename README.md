@@ -149,16 +149,19 @@ Apertou ENTER? Ele bumpa o contador, atualiza `LAST_TS`, troca 🆕 → 📖 e p
 ```bash
 git clone git@github.com:romuloMendes/mklink.git
 cd mklink
+chmod +x install.sh
 ./install.sh
 ```
 
 Isso copia o binário para `~/.local/bin/mklink` (modo `755`).
 
+> ⚠️ **Após instalar: feche o terminal e abra um novo.** O instalador já configura o PATH automaticamente, mas a mudança só vale em terminais abertos depois.
+
 ### Opção 2 — manual
 
 ```bash
 git clone git@github.com:romuloMendes/mklink.git
-install -m 755 mklink/bin/mklink ~/.local/bin/mklink
+install -m 755 mklink/mklink ~/.local/bin/mklink
 ```
 
 ### ⚠️ PATH
